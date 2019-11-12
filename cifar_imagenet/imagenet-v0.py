@@ -260,13 +260,13 @@ def main():
     elif args.optimizer.lower() == 'radam':
         optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'lsadam': 
-        optimizer = LSAdamW(model.parameters(), lr=args.lr*((1.+4.*args.sigma)**(0.25)), 
+        optimizer = LSAdamW(model.parameters(), lr=args.lr, 
                            betas=(args.beta1, args.beta2),
                            weight_decay=args.weight_decay, 
                            sigma=args.sigma)
     elif args.optimizer.lower() == 'lsradam':
         sigma = 0.1
-        optimizer = LSRAdam(model.parameters(), lr=args.lr*((1.+4.*args.sigma)**(0.25)), 
+        optimizer = LSRAdam(model.parameters(), lr=args.lr, 
                            betas=(args.beta1, args.beta2),
                            weight_decay=args.weight_decay, 
                            sigma=args.sigma)

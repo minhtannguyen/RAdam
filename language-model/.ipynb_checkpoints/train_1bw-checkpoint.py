@@ -13,15 +13,11 @@ from model_word_ada.LM import LM
 from model_word_ada.basic import BasicRNN
 from model_word_ada.ddnet import DDRNN
 from model_word_ada.radam import RAdam
-from model_word_ada.lsradam import LSRAdam
-from model_word_ada.lsadam import LSAdam
 from model_word_ada.ldnet import LDRNN
 from model_word_ada.densenet import DenseRNN
 from model_word_ada.dataset import LargeDataset, EvalDataset
 from model_word_ada.adaptive import AdaptiveSoftmax
 import model_word_ada.utils as utils
-
-from tensorboardX import SummaryWriter
 
 # from tensorboardX import SummaryWriter
 # writer = SummaryWriter(logdir='./cps/gadam/log_1bw_full/')
@@ -57,9 +53,6 @@ def evaluate(data_loader, lm_model, criterion, limited = 76800):
 
     return ppl
 
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_folder', default='/data/billionwords/one_billion/')
@@ -76,7 +69,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int, default=1)
     parser.add_argument('--epoch', type=int, default=14)
     parser.add_argument('--clip', type=float, default=5)
-    parser.add_argument('--update', choices=['Adam', 'Adagrad', 'Adadelta', 'RAdam', 'SGD', 'LSRAdam', 'LSAdam'], default='Adam')
+    parser.add_argument('--update', choices=['Adam', 'Adagrad', 'Adadelta', 'RAdam', 'SGD'], default='Adam')
     parser.add_argument('--rnn_layer', choices=['Basic', 'DDNet', 'DenseNet', 'LDNet'], default='Basic')
     parser.add_argument('--rnn_unit', choices=['gru', 'lstm', 'rnn', 'bnlstm'], default='lstm')
     parser.add_argument('--lr', type=float, default=-1)
@@ -86,18 +79,7 @@ if __name__ == "__main__":
     parser.add_argument('--check_interval', type=int, default=4000)
     parser.add_argument('--checkpath', default='./cps/gadam/')
     parser.add_argument('--model_name', default='adam')
-    parser.add_argument('--sigma', default=0.1, type=float, help='sigma in LS(R)Adam')
-    parser.add_argument('--beta1', default=0.9, type=float,
-                    help='beta1 for adam')
-    parser.add_argument('--beta2', default=0.999, type=float,
-                    help='beta2 for adam')
-    parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)')
     args = parser.parse_args()
-    
-    # logger
-    if not os.path.exists(args.checkpath): os.makedirs(args.checkpath)
-    writer = SummaryWriter(os.path.join(args.checkpath, 'tensorboard')) # write to tensorboard
 
     if args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
@@ -124,21 +106,12 @@ if __name__ == "__main__":
     lm_model = LM(rnn_layer, soft_max, len(w_map), args.word_dim, args.droprate, label_dim = args.label_dim, add_relu=args.add_relu)
     lm_model.rand_ini()
     # lm_model.cuda()
-    
 
-    optim_map = {'Adam' : optim.Adam, 'Adagrad': optim.Adagrad, 'Adadelta': optim.Adadelta, 'RAdam': RAdam, 'SGD': functools.partial(optim.SGD, momentum=0.9), 'LSAdam': LSAdam, 'LSRAdam':LSRAdam}
-    if args.update == 'LSRAdam' or args.update == 'LSAdam':
-            optimizer = optim_map[args.update](lm_model.parameters(), lr=args.lr*((1.+4.*args.sigma)**(0.25)), 
-                           betas=(args.beta1, args.beta2),
-                           weight_decay=args.weight_decay, 
-                           sigma=args.sigma)
-            
+    optim_map = {'Adam' : optim.Adam, 'Adagrad': optim.Adagrad, 'Adadelta': optim.Adadelta, 'RAdam': RAdam, 'SGD': functools.partial(optim.SGD, momentum=0.9)}
+    if args.lr > 0:
+        optimizer=optim_map[args.update](lm_model.parameters(), lr=args.lr)
     else:
-        if args.lr > 0:
-            optimizer=optim_map[args.update](lm_model.parameters(), lr=args.lr)
-        else:
-            optimizer=optim_map[args.update](lm_model.parameters())
-            
+        optimizer=optim_map[args.update](lm_model.parameters())
 
     if args.load_checkpoint:
         if os.path.isfile(args.load_checkpoint):

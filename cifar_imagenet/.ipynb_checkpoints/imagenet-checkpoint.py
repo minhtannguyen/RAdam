@@ -23,14 +23,17 @@ import models.imagenet as customized_models
 
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from utils.radam import RAdam, AdamW
+from utils.lsradam import LSRAdam, LSAdamW
 
 from tensorboardX import SummaryWriter
 
-import warnings
-warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
-
-# from tensorboardX import SummaryWriter
-# writer = SummaryWriter(logdir='/cps/gadam/log_imagenet/')
+try:
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator
+    from nvidia.dali.pipeline import Pipeline
+    import nvidia.dali.ops as ops
+    import nvidia.dali.types as types
+except ImportError:
+    raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
 
 # Models
 default_model_names = sorted(name for name in models.__dict__
@@ -106,6 +109,15 @@ parser.add_argument('--gpu-id', default='0', type=str,
 
 parser.add_argument('--model_name', default='sgd')
 
+# DALI
+parser.add_argument('--dali_cpu', action='store_true',
+                    help='Runs CPU based version of DALI pipeline.')
+
+parser.add_argument("--local_rank", default=0, type=int)
+
+# LSAdam
+parser.add_argument('--sigma', default=0.1, type=float, help='sigma in LSAdam')
+
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
 
@@ -125,6 +137,64 @@ torch.manual_seed(args.manualSeed)
 if use_cuda:
     torch.cuda.manual_seed_all(args.manualSeed)
 
+class HybridTrainPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False):
+        super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+        decoder_device = 'cpu' if dali_cpu else 'mixed'
+        # This padding sets the size of the internal nvJPEG buffers to be able to handle all images from full-sized ImageNet
+        # without additional reallocations
+        device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
+        host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
+        self.decode = ops.ImageDecoderRandomCrop(device=decoder_device, output_type=types.RGB,
+                                                 device_memory_padding=device_memory_padding,
+                                                 host_memory_padding=host_memory_padding,
+                                                 random_aspect_ratio=[0.8, 1.25],
+                                                 random_area=[0.1, 1.0],
+                                                 num_attempts=100)
+        self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
+        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+                                            output_dtype=types.FLOAT,
+                                            output_layout=types.NCHW,
+                                            crop=(crop, crop),
+                                            image_type=types.RGB,
+                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
+                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
+        self.coin = ops.CoinFlip(probability=0.5)
+        #logger.info('DALI "{0}" variant'.format(dali_device))
+
+    def define_graph(self):
+        rng = self.coin()
+        self.jpegs, self.labels = self.input(name="Reader")
+        images = self.decode(self.jpegs)
+        images = self.res(images)
+        output = self.cmnp(images.gpu(), mirror=rng)
+        return [output, self.labels]
+
+class HybridValPipe(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size):
+        super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
+        self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
+        self.res = ops.Resize(device="gpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
+        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+                                            output_dtype=types.FLOAT,
+                                            output_layout=types.NCHW,
+                                            crop=(crop, crop),
+                                            image_type=types.RGB,
+                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
+                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
+
+    def define_graph(self):
+        self.jpegs, self.labels = self.input(name="Reader")
+        images = self.decode(self.jpegs)
+        images = self.res(images)
+        output = self.cmnp(images)
+        return [output, self.labels]
+
+
 best_top1 = 0  # best test top1 accuracy
 best_top5 = 0  # best test top5 accuracy
 batch_time_global = AverageMeter()
@@ -137,38 +207,28 @@ def to_python_float(t):
         return t[0]
 
 def main():
-    global best_top1, best_top5, batch_time_global, data_time_global, state
+    global best_top1, best_top5
+    
+    args.world_size = 1
     
     start_epoch = args.start_epoch  # start from epoch 0 or last checkpoint epoch
 
     if not os.path.isdir(args.checkpoint):
         mkdir_p(args.checkpoint)
 
-    # Data loading code
+    # Data loading code    
     traindir = os.path.join(args.data, 'train')
     valdir = os.path.join(args.data, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    crop_size = 224
+    val_size = 256
 
-    train_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(traindir, transforms.Compose([
-            transforms.RandomSizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.train_batch, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
+    pipe = HybridTrainPipe(batch_size=args.train_batch, num_threads=args.workers, device_id=args.local_rank, data_dir=traindir, crop=crop_size, dali_cpu=args.dali_cpu)
+    pipe.build()
+    train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
 
-    val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Scale(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.test_batch, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+    pipe = HybridValPipe(batch_size=args.test_batch, num_threads=args.workers, device_id=args.local_rank, data_dir=valdir, crop=crop_size, size=val_size)
+    pipe.build()
+    val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size("Reader") / args.world_size))
 
     # create model
     if args.pretrained:
@@ -199,7 +259,18 @@ def main():
         optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'radam':
         optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
-
+    elif args.optimizer.lower() == 'lsadam': 
+        optimizer = LSAdamW(model.parameters(), lr=args.lr*((1.+4.*args.sigma)**(0.25)), 
+                           betas=(args.beta1, args.beta2),
+                           weight_decay=args.weight_decay, 
+                           sigma=args.sigma)
+    elif args.optimizer.lower() == 'lsradam':
+        sigma = 0.1
+        optimizer = LSRAdam(model.parameters(), lr=args.lr*((1.+4.*args.sigma)**(0.25)), 
+                           betas=(args.beta1, args.beta2),
+                           weight_decay=args.weight_decay, 
+                           sigma=args.sigma)
+        
     # Resume
     title = 'ImageNet-' + args.arch
     if args.resume:
@@ -218,8 +289,6 @@ def main():
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
         logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Top1', 'Valid Top1', 'Train Top5', 'Valid Top5'])
         
-#     logger.file.write(args)
-#     logger.file.write(model)
     logger.file.write('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
 
@@ -242,12 +311,12 @@ def main():
         # append logger file
         logger.append([state['lr'], train_loss, test_loss, train_top1, test_top1, train_top5, test_top5])
 
-        writer.add_scalars('loss_tracking/train_loss', {args.model_name: train_loss}, epoch)
-        writer.add_scalars('loss_tracking/test_loss', {args.model_name: test_loss}, epoch)
-        writer.add_scalars('loss_tracking/train_top1', {args.model_name: train_top1}, epoch)
-        writer.add_scalars('loss_tracking/test_top1', {args.model_name: test_top1}, epoch)
-        writer.add_scalars('loss_tracking/train_top5', {args.model_name: train_top5}, epoch)
-        writer.add_scalars('loss_tracking/test_top5', {args.model_name: test_top5}, epoch)
+        writer.add_scalars('train_loss', {args.model_name: train_loss}, epoch)
+        writer.add_scalars('test_loss', {args.model_name: test_loss}, epoch)
+        writer.add_scalars('train_top1', {args.model_name: train_top1}, epoch)
+        writer.add_scalars('test_top1', {args.model_name: test_top1}, epoch)
+        writer.add_scalars('train_top5', {args.model_name: train_top5}, epoch)
+        writer.add_scalars('test_top5', {args.model_name: test_top5}, epoch)
 
         # save model
         is_best = test_top1 > best_top1
@@ -262,16 +331,26 @@ def main():
                 'best_top5': best_top5,
                 'optimizer' : optimizer.state_dict(),
             }, is_best, checkpoint=args.checkpoint)
-
-    logger.close()
-    logger.plot()
-    savefig(os.path.join(args.checkpoint, 'log.eps'))
-
+        
+        # reset DALI iterators
+        train_loader.reset()
+        val_loader.reset()
+    
     logger.file.write('Best top1:')
     logger.file.write(best_top1)
     
     logger.file.write('Best top5:')
     logger.file.write(best_top5)
+    
+    logger.close()
+    logger.plot()
+    savefig(os.path.join(args.checkpoint, 'log.eps'))
+
+    print('Best top1:')
+    print(best_top1)
+    
+    print('Best top5:')
+    print(best_top5)
 
 def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
     global batch_time_global, data_time_global
@@ -285,12 +364,17 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
     top5 = AverageMeter()
     end = time.time()
 
-    bar = Bar('Processing', max=len(train_loader))
-    for batch_idx, (inputs, targets) in enumerate(train_loader):
+    train_loader_len = int(train_loader._size / args.train_batch) + 1
+    bar = Bar('Processing', max=train_loader_len)
+    for batch_idx, data in enumerate(train_loader):
         # measure data loading time
         data_time_lap = time.time() - end
         data_time.update(data_time_lap)
-        data_time_global.update(data_time_lap)
+        if epoch > 0:
+            data_time_global.update(data_time_lap)
+        
+        inputs = data[0]["data"]
+        targets = data[0]["label"].squeeze().cuda().long()
 
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda(non_blocking=True)
@@ -314,13 +398,15 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
         # measure elapsed time
         batch_time_lap = time.time() - end
         batch_time.update(batch_time_lap)
-        batch_time_global.update(batch_time_lap)
+        if epoch > 0:
+            batch_time_global.update(batch_time_lap)
         end = time.time()
 
         # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s/{data:.3f}s | Batch: {bt:.3f}s/{bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+        bar.suffix  = '(Epoch {epoch}, {batch}/{size}) Data: {data:.3f}s/{data_global:.3f}s | Batch: {bt:.3f}s/{bt_global:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                    epoch=epoch,
                     batch=batch_idx + 1,
-                    size=len(train_loader),
+                    size=train_loader_len,
                     data=data_time.val,
                     data_global=data_time_global.avg,
                     bt=batch_time.val,
@@ -349,10 +435,15 @@ def test(val_loader, model, criterion, epoch, use_cuda, logger):
     model.eval()
 
     end = time.time()
-    bar = Bar('Processing', max=len(val_loader))
-    for batch_idx, (inputs, targets) in enumerate(val_loader):
+    
+    val_loader_len = int(val_loader._size / args.test_batch)
+    bar = Bar('Processing', max=val_loader_len)
+    for batch_idx, data in enumerate(val_loader):
         # measure data loading time
         data_time.update(time.time() - end)
+        
+        inputs = data[0]["data"]
+        targets = data[0]["label"].squeeze().cuda().long()
 
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -373,9 +464,10 @@ def test(val_loader, model, criterion, epoch, use_cuda, logger):
         end = time.time()
 
         # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+        bar.suffix  = '(Epoch {epoch}, {batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                    epoch=epoch,
                     batch=batch_idx + 1,
-                    size=len(val_loader),
+                    size=val_loader_len,
                     data=data_time.avg,
                     bt=batch_time.avg,
                     total=bar.elapsed_td,

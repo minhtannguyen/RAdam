@@ -71,11 +71,3 @@ from .densenet import *
 from .horesnet import *
 from .horesnet_alt import *
 from .hopreresnet import *
-from .hopreresnet_restart import *
-from .hopreresnet_learned import *
-from .hopreresnet_learned_v2 import *
-from .hopreresnet_restart_v2 import *
-from .hopreresnet_restart_v3 import *
-from .hopreresnet_restart_v4 import *
-from .hopreresnet_restart_v5 import *
-from .hopreresnet_restart_v6 import *

@@ -19,7 +19,7 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-import models.imagenet as customized_models
+import models.imagenet_v4_1 as customized_models
 
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from utils.radam import RAdam, AdamW
@@ -117,6 +117,9 @@ parser.add_argument("--local_rank", default=0, type=int)
 
 # LSAdam
 parser.add_argument('--sigma', default=0.1, type=float, help='sigma in LSAdam')
+
+# HOResNet
+parser.add_argument('--eta', default=1.0, type=float, help='eta in HOResNet')
 
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
@@ -239,6 +242,9 @@ def main():
                     baseWidth=args.base_width,
                     cardinality=args.cardinality,
                 )
+    elif args.arch.startswith('ho'):
+        model = models.__dict__[args.arch](eta=args.eta)
+        
     else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
