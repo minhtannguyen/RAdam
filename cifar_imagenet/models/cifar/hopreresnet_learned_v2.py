@@ -76,7 +76,7 @@ class Bottleneck(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
-        self.eta = Parameter(torch.ones(1,planes,1,1), requires_grad=True)
+        self.eta = Parameter(torch.ones(1,planes * 4,1,1), requires_grad=True)
 
     def forward(self, invec):
         scale_factor = (self.eta - 1.0)/(self.eta + 2.0)

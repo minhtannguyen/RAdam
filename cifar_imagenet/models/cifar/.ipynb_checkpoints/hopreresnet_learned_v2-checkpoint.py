@@ -14,7 +14,7 @@ from torch.nn.parameter import Parameter
 import torch
 
 
-__all__ = ['hopreresnet_learned']
+__all__ = ['hopreresnet_learned_v2']
 
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
@@ -34,10 +34,10 @@ class BasicBlock(nn.Module):
         self.conv2 = conv3x3(planes, planes)
         self.downsample = downsample
         self.stride = stride
-        self.eta = Parameter(torch.tensor(eta), requires_grad=True)
+        self.eta = Parameter(torch.ones(1,planes,1,1), requires_grad=True)
 
     def forward(self, invec):
-        scale_factor = (self.eta - 1)/(self.eta + 2)
+        scale_factor = (self.eta - 1.0)/(self.eta + 2.0)
         x, y = invec[0], invec[1]
         
         residualx = x
@@ -56,8 +56,8 @@ class BasicBlock(nn.Module):
             residualy = self.downsample(y)
         
         outy = out + residualx
-        outx = (1 + scale_factor) * outy - scale_factor * residualy
-
+        outx = (1.0 + scale_factor) * outy - scale_factor * residualy
+        
         return [outx, outy]
 
 
@@ -76,10 +76,10 @@ class Bottleneck(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
-        self.eta = Parameter(torch.tensor(eta), requires_grad=True)
+        self.eta = Parameter(torch.ones(1,planes * 4,1,1), requires_grad=True)
 
     def forward(self, invec):
-        scale_factor = (self.eta - 1)/(self.eta + 2)
+        scale_factor = (self.eta - 1.0)/(self.eta + 2.0)
         x, y = invec[0], invec[1]
         
         residualx = x
@@ -102,7 +102,7 @@ class Bottleneck(nn.Module):
             residualy = self.downsample(y)
 
         outy = out + residualx
-        outx = (1 + scale_factor) * outy - scale_factor * residualy
+        outx = (1.0 + scale_factor) * outy - scale_factor * residualy
 
         return [outx, outy]
 
@@ -183,7 +183,7 @@ class HOPreResNet(nn.Module):
         return x
 
 
-def hopreresnet_learned(**kwargs):
+def hopreresnet_learned_v2(**kwargs):
     """
     Constructs a ResNet model.
     """

@@ -167,7 +167,7 @@ if __name__ == '__main__':
     download = False
     
     kwargs = {'num_workers':1, 'pin_memory':True}
-    batchsize_test = 200
+    batchsize_test = 1000
     if attack_type == 'cw':
         batchsize_test = 1
     print('Batch size of the test set: ', batchsize_test)
@@ -245,7 +245,9 @@ if __name__ == '__main__':
     elif attack_type == 'ifgsm':
         for batch_idx, (x1, y1_true) in enumerate(test_loader):
           #if batch_idx < 100:
-            x_Test = x1.numpy()
+            #x_Test = (x_Test - x_Test.min())/(x_Test.max()-x_Test.min())
+            x_Test = ((x1 - x1.min())/(x1.max() - x1.min()) - 0.5)*2
+            x_Test = x_Test.numpy()
             y_Test = y1_true.numpy()
             
             x = Variable(torch.cuda.FloatTensor(x_Test.reshape(batchsize_test, 3, 32, 32)), requires_grad=True)

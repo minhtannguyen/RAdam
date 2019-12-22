@@ -22,6 +22,8 @@ import models.cifar as models
 
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from utils.radam import RAdam, AdamW
+from optimizers.sgd_adaptive3 import *
+from optimizers.SRNadam import *
 
 from tensorboardX import SummaryWriter
 
@@ -46,7 +48,7 @@ parser.add_argument('--train-batch', default=128, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--test-batch', default=100, type=int, metavar='N',
                     help='test batchsize')
-parser.add_argument('--optimizer', default='sgd', type=str, choices=['adamw', 'radam', 'sgd'])
+parser.add_argument('--optimizer', default='sgd', type=str, choices=['adamw', 'adam', 'radam', 'sgd', 'srsgd', 'sradam'])
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--beta1', default=0.9, type=float,
@@ -207,7 +209,30 @@ def main():
                     block_name=args.block_name,
                     feature_vec=args.feature_vec
                 )
+    elif args.arch.startswith('nagpreresnet'):
+        model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
+    elif args.arch.startswith('mompreresnet'):
+        model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
+    elif args.arch.startswith('v2_preresnet'):
+        model = models.__dict__[args.arch](
+                    block_name='basicblock', 
+                    num_blocks=[2,2,2,2], 
+                    num_classes=num_classes
+                )
     else:
+        print('Model is specified wrongly - Use standard model')
         model = models.__dict__[args.arch](num_classes=num_classes)
 
     model = torch.nn.DataParallel(model).cuda()
@@ -222,6 +247,15 @@ def main():
         optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'adamw':
         optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, warmup=args.warmup)
+    elif args.optimizer.lower() == 'adam':
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
+    elif args.optimizer.lower() == 'srsgd':
+        iter_count = 1
+        optimizer = SGD_Adaptive(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=40)
+    elif args.optimizer.lower() == 'sradam':
+        iter_count = 1
+        optimizer = SRNAdam(model.parameters(), lr=args.lr, iter_count=iter_count, restarting_iter=100) 
+    
     # Resume
     title = 'cifar-10-' + args.arch
     # if args.resume:
@@ -247,11 +281,38 @@ def main():
 
     # Train and val
     for epoch in range(start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch)
+        if args.optimizer.lower() == 'srsgd':
+            if epoch == args.schedule[0]:
+                optimizer = SGD_Adaptive(model.parameters(), lr=args.lr * args.gamma, weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=80)
+            elif epoch == args.schedule[1]:
+                optimizer = SGD_Adaptive(model.parameters(), lr=args.lr * (args.gamma**2), weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=200)
+            elif epoch == args.schedule[2]:
+                optimizer = SGD_Adaptive(model.parameters(), lr=args.lr * (args.gamma**3), weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=500)
+            elif epoch == args.schedule[3]:
+                optimizer = SGD_Adaptive(model.parameters(), lr=args.lr * (args.gamma**4), weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=1000)   
+        elif args.optimizer.lower() == 'sradam':
+            if epoch == 80:
+                optimizer = SRNAdam(model.parameters(), lr=args.lr * args.gamma, iter_count=iter_count, restarting_iter=500) #500 done
+            elif epoch ==160:
+                optimizer = SRNAdam(model.parameters(), lr=args.lr * (args.gamma**2), iter_count=iter_count, restarting_iter=1000) #1000 done
+        elif args.arch.startswith('wrn'):
+            if args.optimizer.lower() == 'sgd':
+                if epoch == 60:
+                    optimizer = optim.SGD(model.parameters(), lr=0.02, momentum=args.momentum, weight_decay=args.weight_decay)
+                elif epoch ==120:
+                    optimizer = optim.SGD(model.parameters(), lr=0.004, momentum=args.momentum, weight_decay=args.weight_decay)
+                elif epoch ==160:
+                    optimizer = optim.SGD(model.parameters(), lr=0.0008, momentum=args.momentum, weight_decay=args.weight_decay)
+        else:
+            adjust_learning_rate(optimizer, epoch)
 
         logger.file.write('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
-
-        train_loss, train_acc = train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger)
+        
+        if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam':
+            train_loss, train_acc, iter_count = train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger)
+        else:
+            train_loss, train_acc = train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger)
+            
         test_loss, test_acc = test(testloader, model, criterion, epoch, use_cuda, logger)
 
         # append logger file
@@ -320,6 +381,10 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        
+        # for restarting
+        if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam':
+            iter_count, iter_total = optimizer.update_iter()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -341,7 +406,10 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger):
         logger.file.write(bar.suffix)
         bar.next()
     bar.finish()
-    return (losses.avg, top1.avg)
+    if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam':
+        return (losses.avg, top1.avg, iter_count)
+    else:
+        return (losses.avg, top1.avg)
 
 def test(testloader, model, criterion, epoch, use_cuda, logger):
     global best_acc

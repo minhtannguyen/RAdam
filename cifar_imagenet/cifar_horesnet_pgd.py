@@ -164,12 +164,10 @@ def main():
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
     transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
     if args.dataset == 'cifar10':
         dataloader = datasets.CIFAR10
@@ -238,7 +236,24 @@ def main():
                     block_name=args.block_name,
                     feature_vec=args.feature_vec
                 )
+    elif args.arch.startswith('nagpreresnet'):
+        basic_model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
+    elif args.arch.startswith('mompreresnet'):
+        basic_model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
     else:
+        print('Model is specified wrongly - Use standard model')
         basic_model = models.__dict__[args.arch](num_classes=num_classes)
     
     

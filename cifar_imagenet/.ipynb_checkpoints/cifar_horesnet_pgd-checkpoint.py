@@ -25,6 +25,8 @@ from utils.radam import RAdam, AdamW
 
 from tensorboardX import SummaryWriter
 
+import torch.nn.functional as F
+
 # from tensorboardX import SummaryWriter
 # writer = SummaryWriter(logdir='/cps/gadam/log_cifa10/')
 
@@ -120,6 +122,35 @@ if use_cuda:
 
 best_acc = 0  # best test accuracy
 
+class AttackPGD(nn.Module):
+    """
+    PGD Adversarial training    
+    """
+    def __init__(self, basic_net, config):
+        super(AttackPGD, self).__init__()
+        self.basic_net = basic_net
+        self.rand = config['random_start']
+        self.step_size = config['step_size']
+        self.epsilon = config['epsilon']
+        self.num_steps = config['num_steps']
+        assert config['loss_func'] == 'xent', 'Only xent supported for now.'
+    
+    def forward(self, inputs, targets):
+        x = inputs
+        if self.rand:
+            x = x + torch.zeros_like(x).uniform_(-self.epsilon, self.epsilon)
+        for i in range(self.num_steps): # iFGSM attack
+            x.requires_grad_()
+            with torch.enable_grad():
+                logits = self.basic_net(x)
+                loss = F.cross_entropy(logits, targets, size_average=False)
+            grad = torch.autograd.grad(loss, [x])[0]
+            x = x.detach() + self.step_size*torch.sign(grad.detach())
+            x = torch.min(torch.max(x, inputs - self.epsilon), inputs + self.epsilon)
+            x = torch.clamp(x, 0, 1)
+
+        return self.basic_net(x), x
+
 def main():
     global best_acc
     start_epoch = args.start_epoch  # start from epoch 0 or last checkpoint epoch
@@ -133,12 +164,10 @@ def main():
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
     transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
     if args.dataset == 'cifar10':
         dataloader = datasets.CIFAR10
@@ -157,7 +186,7 @@ def main():
     # Model
     print("==> creating model '{}'".format(args.arch))
     if args.arch.startswith('resnext'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     cardinality=args.cardinality,
                     num_classes=num_classes,
                     depth=args.depth,
@@ -165,7 +194,7 @@ def main():
                     dropRate=args.drop,
                 )
     elif args.arch.startswith('densenet'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     growthRate=args.growthRate,
@@ -173,26 +202,26 @@ def main():
                     dropRate=args.drop,
                 )
     elif args.arch.startswith('wrn'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     widen_factor=args.widen_factor,
                     dropRate=args.drop,
                 )
     elif args.arch.startswith('resnet'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     block_name=args.block_name,
                 )
     elif args.arch.startswith('preresnet'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     block_name=args.block_name,
                 )
     elif args.arch.startswith('horesnet'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     eta=args.eta,
@@ -200,7 +229,23 @@ def main():
                     feature_vec=args.feature_vec
                 )
     elif args.arch.startswith('hopreresnet'):
-        model = models.__dict__[args.arch](
+        basic_model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
+    elif args.arch.startswith('nagpreresnet'):
+        basic_model = models.__dict__[args.arch](
+                    num_classes=num_classes,
+                    depth=args.depth,
+                    eta=args.eta,
+                    block_name=args.block_name,
+                    feature_vec=args.feature_vec
+                )
+    elif args.arch.startswith('mompreresnet'):
+        basic_model = models.__dict__[args.arch](
                     num_classes=num_classes,
                     depth=args.depth,
                     eta=args.eta,
@@ -208,8 +253,20 @@ def main():
                     feature_vec=args.feature_vec
                 )
     else:
-        model = models.__dict__[args.arch](num_classes=num_classes)
-
+        print('Model is specified wrongly - Use standard model')
+        basic_model = models.__dict__[args.arch](num_classes=num_classes)
+    
+    
+    # From https://github.com/MadryLab/cifar10_challenge/blob/master/config.json
+    config = {
+        'epsilon': 0.031, #8.0 / 255, # Test 1.0-8.0
+        'num_steps': 10,
+        'step_size': 0.007, #6.0 / 255, # 7.0
+        'random_start': True,
+        'loss_func': 'xent',
+    }
+    
+    model = AttackPGD(basic_model, config).cuda()
     model = torch.nn.DataParallel(model).cuda()
     cudnn.benchmark = True
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
@@ -271,7 +328,7 @@ def main():
         best_acc = max(test_acc, best_acc)
         save_checkpoint({
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': basic_model.state_dict(),
                 'acc': test_acc,
                 'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict(),
@@ -307,7 +364,7 @@ def train(trainloader, model, criterion, optimizer, epoch, use_cuda, logger):
         inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
 
         # compute output
-        outputs = model(inputs)
+        outputs, pert_x = model(inputs, targets)
         loss = criterion(outputs, targets)
 
         # measure accuracy and record loss
@@ -366,7 +423,7 @@ def test(testloader, model, criterion, epoch, use_cuda, logger):
         inputs, targets = torch.autograd.Variable(inputs, volatile=True), torch.autograd.Variable(targets)
 
         # compute output
-        outputs = model(inputs)
+        outputs, pert_x = model(inputs, targets)
         loss = criterion(outputs, targets)
 
         # measure accuracy and record loss
