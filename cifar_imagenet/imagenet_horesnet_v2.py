@@ -342,21 +342,15 @@ def main():
         train_loader.reset()
         val_loader.reset()
     
-    logger.file.write('Best top1:')
-    logger.file.write(best_top1)
-    
-    logger.file.write('Best top5:')
-    logger.file.write(best_top5)
+    logger.file.write('Best top1: %f'%best_top1)
+    logger.file.write('Best top5: %f'%best_top5)
     
     logger.close()
     logger.plot()
     savefig(os.path.join(args.checkpoint, 'log.eps'))
 
-    print('Best top1:')
-    print(best_top1)
-    
-    print('Best top5:')
-    print(best_top5)
+    print('Best top1: %f'%best_top1)
+    print('Best top5: %f'%best_top5)
 
 def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
     global batch_time_global, data_time_global

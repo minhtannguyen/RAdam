@@ -32,7 +32,7 @@ class BasicBlock(nn.Module):
         self.downsample = downsample
         self.stride = stride
         self.eta = eta
-        self.scale_factor = (self.eta - 1)/(self.eta + 2)
+        self.scale_factor = (self.eta - 1.0)/(self.eta + 2.0)
 
     def forward(self, invec):
         x, y = invec[0], invec[1]
@@ -53,7 +53,7 @@ class BasicBlock(nn.Module):
             residualy = self.downsample(y)
         
         outy = out + residualx
-        outx = (1 + self.scale_factor) * outy - self.scale_factor * residualy
+        outx = (1.0 + self.scale_factor) * outy - self.scale_factor * residualy
 
         return [outx, outy]
 
@@ -74,7 +74,7 @@ class Bottleneck(nn.Module):
         self.downsample = downsample
         self.stride = stride
         self.eta = eta
-        self.scale_factor = (self.eta - 1)/(self.eta + 2)
+        self.scale_factor = (self.eta - 1.0)/(self.eta + 2.0)
 
     def forward(self, invec):
         x, y = invec[0], invec[1]
@@ -99,7 +99,7 @@ class Bottleneck(nn.Module):
             residualy = self.downsample(y)
 
         outy = out + residualx
-        outx = (1 + self.scale_factor) * outy - self.scale_factor * residualy
+        outx = (1.0 + self.scale_factor) * outy - self.scale_factor * residualy
 
         return [outx, outy]
 

@@ -10,6 +10,8 @@ import shutil
 import time
 import random
 
+import fcntl
+
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -24,6 +26,10 @@ import models.imagenet as customized_models
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from utils.radam import RAdam, AdamW
 from utils.lsradam import LSRAdam, LSAdamW
+
+from optimizers.sgd_adaptive3 import *
+from optimizers.SRNadam import *
+from optimizers.SRRadam import *
 
 from tensorboardX import SummaryWriter
 
@@ -77,6 +83,8 @@ parser.add_argument('--drop', '--dropout', default=0, type=float,
                     metavar='Dropout', help='Dropout ratio')
 parser.add_argument('--schedule', type=int, nargs='+', default=[150, 225],
                         help='Decrease learning rate at these epochs.')
+parser.add_argument('--restart-schedule', type=int, nargs='+', default=[80, 200, 500, 1000],
+                        help='Restart at after these amounts of epochs.')
 parser.add_argument('--gamma', type=float, default=0.1, help='LR is multiplied by gamma on schedule.')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -255,8 +263,8 @@ def main():
     criterion = nn.CrossEntropyLoss().cuda()
     if args.optimizer.lower() == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif args.optimizer.lower() == 'adam':
-        optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
+    elif args.optimizer.lower() == 'adamw':
+        optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, warmup = 0)
     elif args.optimizer.lower() == 'radam':
         optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'lsadam': 
@@ -270,6 +278,19 @@ def main():
                            betas=(args.beta1, args.beta2),
                            weight_decay=args.weight_decay, 
                            sigma=args.sigma)
+    elif args.optimizer.lower() == 'srsgd':
+        iter_count = 1
+        optimizer = SGD_Adaptive(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=args.restart_schedule[0])
+    elif args.optimizer.lower() == 'sradam':
+        iter_count = 1
+        optimizer = SRNAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, restarting_iter=args.restart_schedule[0]) 
+    elif args.optimizer.lower() == 'sradamw':
+        iter_count = 1
+        optimizer = SRAdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
+    elif args.optimizer.lower() == 'srradam':
+        #NOTE: need to double-check this
+        iter_count = 1
+        optimizer = SRRAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
         
     # Resume
     title = 'ImageNet-' + args.arch
@@ -299,13 +320,38 @@ def main():
         return
 
     # Train and val
-    
+    schedule_index = 1
     for epoch in range(start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch)
+        if args.optimizer.lower() == 'srsgd':
+            if epoch in args.schedule:
+                optimizer = SGD_Adaptive(model.parameters(), lr=args.lr * (args.gamma**schedule_index), weight_decay=args.weight_decay, iter_count=iter_count, restarting_iter=args.restart_schedule[schedule_index])
+                schedule_index += 1
+                
+        elif args.optimizer.lower() == 'sradam':
+            if epoch in args.schedule:
+                optimizer = SRNAdam(model.parameters(), lr=args.lr * (args.gamma**schedule_index), betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, restarting_iter=args.restart_schedule[schedule_index]) 
+                schedule_index += 1
+                
+        elif args.optimizer.lower() == 'sradamw':
+            if epoch in args.schedule:
+                optimizer = SRAdamW(model.parameters(), lr=args.lr * (args.gamma**schedule_index), betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[schedule_index])
+                schedule_index += 1
+                
+        elif args.optimizer.lower() == 'srradam':
+            if epoch in args.schedule:
+                optimizer = SRRAdam(model.parameters(), lr=args.lr * (args.gamma**schedule_index), betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[schedule_index])
+                schedule_index += 1
+            
+        else:
+            adjust_learning_rate(optimizer, epoch)
 
         logger.file.write('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
+        
+        if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam' or args.optimizer.lower() == 'sradamw' or args.optimizer.lower() == 'srradam':
+            train_loss, train_top1, train_top5, iter_count = train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger)
+        else:
+            train_loss, train_top1, train_top5 = train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger)
 
-        train_loss, train_top1, train_top5 = train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger)
         test_loss, test_top1, test_top5 = test(val_loader, model, criterion, epoch, use_cuda, logger)
 
         # append logger file
@@ -330,27 +376,27 @@ def main():
                 'best_top1': best_top1,
                 'best_top5': best_top5,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best, checkpoint=args.checkpoint)
+            }, is_best, epoch, checkpoint=args.checkpoint)
         
         # reset DALI iterators
         train_loader.reset()
         val_loader.reset()
-    
-    logger.file.write('Best top1:')
-    logger.file.write(best_top1)
-    
-    logger.file.write('Best top5:')
-    logger.file.write(best_top5)
+        
+    logger.file.write('Best top1: %f'%best_top1)
+    logger.file.write('Best top5: %f'%best_top5)
     
     logger.close()
     logger.plot()
     savefig(os.path.join(args.checkpoint, 'log.eps'))
 
-    print('Best top1:')
-    print(best_top1)
+    print('Best top1: %f'%best_top1)
+    print('Best top5: %f'%best_top5)
     
-    print('Best top5:')
-    print(best_top5)
+    with open("./all_results_imagenet.txt", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write("%s\n"%args.checkpoint)
+        f.write("best_top1 %f, best_top5 %f\n\n"%(best_top1,best_top5))
+        fcntl.flock(f, fcntl.LOCK_UN)
 
 def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
     global batch_time_global, data_time_global
@@ -394,6 +440,10 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        
+        # for restarting
+        if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam' or args.optimizer.lower() == 'sradamw' or args.optimizer.lower() == 'srradam':
+            iter_count, iter_total = optimizer.update_iter()
 
         # measure elapsed time
         batch_time_lap = time.time() - end
@@ -420,7 +470,10 @@ def train(train_loader, model, criterion, optimizer, epoch, use_cuda, logger):
         bar.next()
         logger.file.write(bar.suffix)
     bar.finish()
-    return (losses.avg, top1.avg, top5.avg)
+    if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam' or args.optimizer.lower() == 'sradamw' or args.optimizer.lower() == 'srradam':
+        return (losses.avg, top1.avg, top5.avg, iter_count)
+    else:
+        return (losses.avg, top1.avg, top5.avg)
 
 def test(val_loader, model, criterion, epoch, use_cuda, logger):
     global best_top1, best_top5
@@ -480,12 +533,14 @@ def test(val_loader, model, criterion, epoch, use_cuda, logger):
         bar.next()
     bar.finish()
     return (losses.avg, top1.avg, top5.avg)
-
-def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
+        
+def save_checkpoint(state, is_best, epoch, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
     torch.save(state, filepath)
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
+    if epoch in args.schedule:
+        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_epoch_%i.pth.tar'%epoch))
 
 def adjust_learning_rate(optimizer, epoch):
     global state

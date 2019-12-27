@@ -291,7 +291,8 @@ def main():
         #NOTE: need to double-check this
         iter_count = 1
         optimizer = SRRAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
-        
+    
+    schedule_index = 1
     # Resume
     title = 'ImageNet-' + args.arch
     if args.resume:
@@ -305,7 +306,9 @@ def main():
         start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
+        iter_count = optimizer.param_groups[0]['iter_count']
+        schedule_index = checkpoint['schedule_index']
+        logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)  
     else:
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
         logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Top1', 'Valid Top1', 'Train Top5', 'Valid Top5'])
@@ -320,7 +323,6 @@ def main():
         return
 
     # Train and val
-    schedule_index = 1
     for epoch in range(start_epoch, args.epochs):
         if args.optimizer.lower() == 'srsgd':
             if epoch in args.schedule:
@@ -370,33 +372,28 @@ def main():
         best_top5 = max(test_top5, best_top5)
         save_checkpoint({
                 'epoch': epoch + 1,
+                'schedule_index': schedule_index,
                 'state_dict': model.state_dict(),
                 'top1': test_top1,
                 'top5': test_top5,
                 'best_top1': best_top1,
                 'best_top5': best_top5,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best, checkpoint=args.checkpoint)
+            }, is_best, epoch, checkpoint=args.checkpoint)
         
         # reset DALI iterators
         train_loader.reset()
         val_loader.reset()
-    
-    logger.file.write('Best top1:')
-    logger.file.write(best_top1)
-    
-    logger.file.write('Best top5:')
-    logger.file.write(best_top5)
+        
+    logger.file.write('Best top1: %f'%best_top1)
+    logger.file.write('Best top5: %f'%best_top5)
     
     logger.close()
     logger.plot()
     savefig(os.path.join(args.checkpoint, 'log.eps'))
 
-    print('Best top1:')
-    print(best_top1)
-    
-    print('Best top5:')
-    print(best_top5)
+    print('Best top1: %f'%best_top1)
+    print('Best top5: %f'%best_top5)
     
     with open("./all_results_imagenet.txt", "a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -539,12 +536,15 @@ def test(val_loader, model, criterion, epoch, use_cuda, logger):
         bar.next()
     bar.finish()
     return (losses.avg, top1.avg, top5.avg)
-
-def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
+        
+def save_checkpoint(state, is_best, epoch, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
     torch.save(state, filepath)
+    next_epoch = epoch + 1
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
+    if next_epoch in args.schedule:
+        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_epoch_%i.pth.tar'%epoch))
 
 def adjust_learning_rate(optimizer, epoch):
     global state

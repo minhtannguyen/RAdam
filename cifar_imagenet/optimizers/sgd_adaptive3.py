@@ -81,7 +81,8 @@ class SGD_Adaptive(Optimizer):
                 else:
                     buf0 = param_state['momentum_buffer']
                 
-                buf1 = p.data - momentum*group['lr']*d_p
+                # buf1 = p.data - momentum*group['lr']*d_p
+                buf1 = p.data - group['lr']*d_p
                 p.data = buf1 + momentum*(buf1 - buf0)
                 param_state['momentum_buffer'] = buf1
         return loss

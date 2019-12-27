@@ -267,7 +267,7 @@ def main():
     elif args.optimizer.lower() == 'radam':
         optimizer = RAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'adamw':
-        optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, warmup=0)
+        optimizer = AdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay, warmup=args.warmup)
     elif args.optimizer.lower() == 'adam':
         optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.weight_decay)
     elif args.optimizer.lower() == 'srsgd':
@@ -278,11 +278,11 @@ def main():
         optimizer = SRNAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, restarting_iter=args.restart_schedule[0]) 
     elif args.optimizer.lower() == 'sradamw':
         iter_count = 1
-        optimizer = SRAdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
+        optimizer = SRAdamW(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = args.warmup, restarting_iter=args.restart_schedule[0]) 
     elif args.optimizer.lower() == 'srradam':
         #NOTE: need to double-check this
         iter_count = 1
-        optimizer = SRRAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
+        optimizer = SRRAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = args.warmup, restarting_iter=args.restart_schedule[0]) 
     
     # Resume
     title = 'cifar-10-' + args.arch
@@ -297,6 +297,7 @@ def main():
 
     # Train and val
     schedule_index = 1
+    
     for epoch in range(start_epoch, args.epochs):
         if args.optimizer.lower() == 'srsgd':
             if epoch in args.schedule:
@@ -343,11 +344,12 @@ def main():
         best_acc = max(test_acc, best_acc)
         save_checkpoint({
                 'epoch': epoch + 1,
+                'schedule_index': schedule_index,
                 'state_dict': model.state_dict(),
                 'acc': test_acc,
                 'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best, checkpoint=args.checkpoint)
+            }, is_best, epoch, checkpoint=args.checkpoint)
     
     logger.file.write('Best acc:%f'%best_acc)
     
@@ -482,11 +484,15 @@ def test(testloader, model, criterion, epoch, use_cuda, logger):
     bar.finish()
     return (losses.avg, top1.avg)
 
-def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, epoch, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
     torch.save(state, filepath)
+    next_epoch = epoch + 1
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
+    if next_epoch in args.schedule:
+        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_epoch_%i.pth.tar'%epoch))
+        
 
 def adjust_learning_rate(optimizer, epoch):
     global state
