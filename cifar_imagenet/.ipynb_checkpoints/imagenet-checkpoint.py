@@ -28,8 +28,8 @@ from utils.radam import RAdam, AdamW
 from utils.lsradam import LSRAdam, LSAdamW
 
 from optimizers.sgd_adaptive3 import *
-from optimizers.SRNadam import *
-from optimizers.SRRadam import *
+from optimizers.SRAdamW import *
+from optimizers.SRRAdam import *
 
 from tensorboardX import SummaryWriter
 
@@ -248,7 +248,6 @@ def main():
                     cardinality=args.cardinality,
                 )
     else:
-        print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
 
     if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
@@ -291,21 +290,30 @@ def main():
         #NOTE: need to double-check this
         iter_count = 1
         optimizer = SRRAdam(model.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), iter_count=iter_count, weight_decay=args.weight_decay, warmup = 0, restarting_iter=args.restart_schedule[0]) 
-        
+    
+    schedule_index = 1
     # Resume
     title = 'ImageNet-' + args.arch
     if args.resume:
         # Load checkpoint.
         print('==> Resuming from checkpoint..')
         assert os.path.isfile(args.resume), 'Error: no checkpoint directory found!'
-        args.checkpoint = os.path.dirname(args.resume)
+        # args.checkpoint = os.path.dirname(args.resume)
         checkpoint = torch.load(args.resume)
         best_top1 = checkpoint['best_top1']
         best_top5 = checkpoint['best_top5']
         start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
+        if args.optimizer.lower() == 'srsgd' or args.optimizer.lower() == 'sradam' or args.optimizer.lower() == 'sradamw' or args.optimizer.lower() == 'srradam':
+            iter_count = optimizer.param_groups[0]['iter_count']
+        schedule_index = checkpoint['schedule_index']
+        state['lr'] =  optimizer.param_groups[0]['lr']
+        if args.checkpoint == args.resume: 
+            logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
+        else:
+            logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
+            logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Top1', 'Valid Top1', 'Train Top5', 'Valid Top5'])
     else:
         logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
         logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Top1', 'Valid Top1', 'Train Top5', 'Valid Top5'])
@@ -320,7 +328,6 @@ def main():
         return
 
     # Train and val
-    schedule_index = 1
     for epoch in range(start_epoch, args.epochs):
         if args.optimizer.lower() == 'srsgd':
             if epoch in args.schedule:
@@ -370,6 +377,7 @@ def main():
         best_top5 = max(test_top5, best_top5)
         save_checkpoint({
                 'epoch': epoch + 1,
+                'schedule_index': schedule_index,
                 'state_dict': model.state_dict(),
                 'top1': test_top1,
                 'top5': test_top5,
@@ -537,9 +545,13 @@ def test(val_loader, model, criterion, epoch, use_cuda, logger):
 def save_checkpoint(state, is_best, epoch, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
     torch.save(state, filepath)
+    next_epoch = epoch + 1
+    next_two_epoch = epoch + 2
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
-    if epoch in args.schedule:
+    if next_epoch in args.schedule:
+        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_epoch_%i.pth.tar'%epoch))
+    if next_two_epoch in args.schedule:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_epoch_%i.pth.tar'%epoch))
 
 def adjust_learning_rate(optimizer, epoch):

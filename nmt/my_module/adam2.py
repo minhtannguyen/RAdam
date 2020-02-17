@@ -23,7 +23,7 @@ iter_idx = 0
 class FairseqAdam2(FairseqOptimizer):
 
     def __init__(self, args, params):
-        super().__init__(args, params)
+        super().__init__(args)
 
         self._optimizer = Adam2(params, **self.optimizer_config)
         self._optimizer.name = args.tb_tag + '_' + self._optimizer.name
@@ -160,5 +160,5 @@ class Adam2(torch.optim.Optimizer):
         #     writer.add_histogram('grad/{}'.format(self.name), grad_list, writer_iter)
         #     writer.add_histogram('mom/{}'.format(self.name), mom_list, writer_iter)
         #     writer.add_histogram('mom_sq/{}'.format(self.name), mom_2rd_list, writer_iter)
-
+        
         return loss
